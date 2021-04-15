@@ -12,9 +12,6 @@ class TimerEventGenerator : public ITimer
     void registerTimer(const Timepoint &tp, const Millisecs &period, const TTimerCallback &cb);
 
     void registerTimer(const TPredicate &pred, const Millisecs &period, const TTimerCallback &cb);
-
-
-private:
 };
 
 
