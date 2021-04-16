@@ -18,29 +18,31 @@ class ITimer
 {
 public:
     // run the callback once at time point tp.
-    void registerITimer(const Timepoint &tp, const TITimerCallback &cb);
+    void registerTimer(const Timepoint &tp, const TITimerCallback &cb);
 
     // run the callback periodically forever. The first call will be executed after the first period.
-    void registerITimer(const Millisecs &period, const TITimerCallback &cb);
+    void registerTimer(const Millisecs &period, const TITimerCallback &cb);
 
     // Run the callback periodically until time point tp. The first call will be executed after the first period.
-    void registerITimer(const Timepoint &tp, const Millisecs &period, const TITimerCallback &cb);
+    void registerTimer(const Timepoint &tp, const Millisecs &period, const TITimerCallback &cb);
 
     // Run the callback periodically. After calling the callback every time, call the predicate to check if the
     //termination criterion is satisfied. If the predicate returns false, stop calling the callback.
-    void registerITimer(const TPredicate &pred, const Millisecs &period, const TITimerCallback &cb);
+    void registerTimer(const TPredicate &pred, const Millisecs &period, const TITimerCallback &cb);
 
     ~ITimer();
+
+    void handler();
 
 private:
     class TimerItem
     {
     public:
-        TimerItem(TITimerCallback, TPredicate, Millisecs);
+        TimerItem(const TITimerCallback &, const TPredicate &, const Millisecs &);
 
-        TITimerCallback getPredict() const;
-        TPredicate getCallBack() const;
-        Millisecs getPeriod() const;
+        const TITimerCallback &getCallBack() const;
+        bool getPredict() const;
+        const Millisecs &getPeriod() const;
 
         Millisecs getTimeToWait() const;
         void setTimeToWait(Millisecs);
@@ -52,11 +54,10 @@ private:
         Millisecs time_to_wait;
     };
 
-    void handler();
-
     // gets the next item from the vector with the highest priority
     TimerItem &next();
     void wait(TimerItem &);
+    void execute(TimerItem &);
 
     bool run = true;
 
@@ -70,19 +71,25 @@ private:
 
 const Millisecs ITimer::zero_sec = Millisecs(0);
 
-void ITimer::registerITimer(const Timepoint &tp, const TITimerCallback &cb)
+void ITimer::registerTimer(const Timepoint &tp, const TITimerCallback &cb)
 {
     std::unique_lock<std::mutex> lck(mtx);
 
-    Millisecs ms = std::chrono::duration_cast<std::chrono::milliseconds>(CLOCK::now() - tp);
+    Millisecs ms = std::chrono::duration_cast<std::chrono::milliseconds>(tp - CLOCK::now());
+    // auto t1 = std::chrono::seconds(0);
+    // auto t2 = tp + std::chrono::seconds(0);
 
     list.push_back(TimerItem(
-        cb, [tp]() { return CLOCK::now() < tp; }, ms));
+        cb, [tp]() { 
+            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(CLOCK::now() - tp).count();
+            // std:: cout << diff << std::endl;
+            // std::cout << (diff < 0) << std::endl;
+            return (diff < 0); }, ms));
 
     cv.notify_all();
 }
 
-void ITimer::registerITimer(const Millisecs &period, const TITimerCallback &cb)
+void ITimer::registerTimer(const Millisecs &period, const TITimerCallback &cb)
 {
     std::unique_lock<std::mutex> lck(mtx);
 
@@ -92,7 +99,7 @@ void ITimer::registerITimer(const Millisecs &period, const TITimerCallback &cb)
     cv.notify_all();
 }
 
-void ITimer::registerITimer(const Timepoint &tp, const Millisecs &period, const TITimerCallback &cb)
+void ITimer::registerTimer(const Timepoint &tp, const Millisecs &period, const TITimerCallback &cb)
 {
     std::unique_lock<std::mutex> lck(mtx);
 
@@ -102,7 +109,7 @@ void ITimer::registerITimer(const Timepoint &tp, const Millisecs &period, const 
     cv.notify_all();
 }
 
-void ITimer::registerITimer(const TPredicate &pred, const Millisecs &period, const TITimerCallback &cb)
+void ITimer::registerTimer(const TPredicate &pred, const Millisecs &period, const TITimerCallback &cb)
 {
     std::unique_lock<std::mutex> lck(mtx);
 
@@ -117,11 +124,13 @@ void ITimer::handler()
 
     while (run)
     {
+        if (list.empty())
+            break;
 
         // get item - wait for item if necessary - execute
         auto &item = next();
         wait(item);
-        next().getCallBack()();
+        execute(item);
 
         cv.wait(lck);
     }
@@ -137,11 +146,7 @@ ITimer::TimerItem &ITimer::next()
     });
 
     // get the item with the highest priority
-    auto &item = list.back();
-    if (!item.getPredict())
-        list.pop_back();
-
-    return item;
+    return list.back();
 }
 
 void ITimer::wait(TimerItem &item)
@@ -159,6 +164,15 @@ void ITimer::wait(TimerItem &item)
 
     // refresh time to wait
     item.setTimeToWait(item.getPeriod());
+
+    if (!item.getPredict())
+        list.pop_back();
+}
+
+void ITimer::execute(TimerItem &item)
+{
+    std::function<void()> f = item.getCallBack();
+    f();
 }
 
 ITimer::~ITimer()
@@ -168,21 +182,22 @@ ITimer::~ITimer()
     cv.notify_all();
 }
 
-ITimer::TimerItem::TimerItem(TITimerCallback cb, TPredicate pred, Millisecs ms)
+ITimer::TimerItem::TimerItem(const TITimerCallback &cb, const TPredicate &pred, const Millisecs &ms)
     : callback(cb), predict(pred), period(ms), time_to_wait(ms)
 {
     /* intentionally left blank */
+    // std::cout << time_to_wait.count() << std::endl;
 }
 
-inline TITimerCallback ITimer::TimerItem::getPredict() const
+inline const TITimerCallback &ITimer::TimerItem::getCallBack() const
 {
     return callback;
 }
-inline TPredicate ITimer::TimerItem::getCallBack() const
+inline bool ITimer::TimerItem::getPredict() const
 {
-    return predict;
+    return predict();
 }
-inline Millisecs ITimer::TimerItem::getPeriod() const
+inline const Millisecs &ITimer::TimerItem::getPeriod() const
 {
     return period;
 }
