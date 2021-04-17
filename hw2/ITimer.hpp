@@ -40,11 +40,12 @@ private:
     class TimerItem
     {
     public:
-        TimerItem(const TITimerCallback &, const TPredicate &, const Millisecs &);
+        TimerItem(const TITimerCallback &, const TPredicate &, const Millisecs &, bool=false);
 
         const TITimerCallback &getCallBack() const;
         bool getPredict() const;
         const Millisecs &getPeriod() const;
+        bool hasTimepoint() const;
 
         Millisecs getTimeToWait() const;
         void setTimeToWait(Millisecs);
@@ -54,12 +55,12 @@ private:
         TPredicate predict;
         Millisecs period;
         Millisecs time_to_wait;
+        bool timepoint;
     };
 
     // gets the next item from the vector with the highest priority
     TimerItem &next();
-    void wait(TimerItem &);
-    void execute(TimerItem &);
+    void wait_and_exec(TimerItem &);
 
     // sync of thread.
     bool run = false;
@@ -89,7 +90,7 @@ void ITimer::registerTimer(const Timepoint &tp, const TITimerCallback &cb)
     list.push_back(TimerItem(
         cb, [tp]() { 
             auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(CLOCK::now() - tp).count();
-            return (diff < 0); }, ms));
+            return (diff < 0); }, ms, true));
     run = true;
     cv.notify_all();
 }
@@ -111,7 +112,7 @@ void ITimer::registerTimer(const Timepoint &tp, const Millisecs &period, const T
     list.push_back(TimerItem(
         cb, [tp]() { 
             auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(CLOCK::now() - tp).count();
-            return (diff < 0); }, period));
+            return (diff < 0); }, period, true));
     run = true;
     cv.notify_all();
 }
@@ -151,8 +152,7 @@ void ITimer::handler()
             assert(!list.empty());
 
             auto &item = next();
-            wait(item);
-            execute(item);
+            wait_and_exec(item);
             run = !list.empty();
         }
     }
@@ -172,7 +172,7 @@ ITimer::TimerItem &ITimer::next()
     return list.back();
 }
 
-void ITimer::wait(TimerItem &item)
+void ITimer::wait_and_exec(TimerItem &item)
 {
     auto time_to_wait = item.getTimeToWait();
 
@@ -187,15 +187,18 @@ void ITimer::wait(TimerItem &item)
     // refresh time to wait
     item.setTimeToWait(item.getPeriod());
 
+    bool exec = true;
     if (!item.getPredict())
+    {
         list.pop_back();
-}
 
-void ITimer::execute(TimerItem &item)
-{
-    std::function<void()> f = item.getCallBack();
-    if (item.getPredict())
-        f();
+        // do not execute if item missed the deadline
+        if (item.hasTimepoint())
+            return;
+    }
+
+    // execute
+    item.getCallBack()();
 }
 
 ITimer::~ITimer()
@@ -213,8 +216,8 @@ ITimer::~ITimer()
     handler_thread.join();
 }
 
-ITimer::TimerItem::TimerItem(const TITimerCallback &cb, const TPredicate &pred, const Millisecs &ms)
-    : callback(cb), predict(pred), period(ms), time_to_wait(ms)
+ITimer::TimerItem::TimerItem(const TITimerCallback &cb, const TPredicate &pred, const Millisecs &ms, bool tp)
+    : callback(cb), predict(pred), period(ms), time_to_wait(ms), timepoint(tp)
 {
     /* intentionally left blank */
 }
@@ -227,6 +230,12 @@ inline bool ITimer::TimerItem::getPredict() const
 {
     return predict();
 }
+
+inline bool ITimer::TimerItem::hasTimepoint() const
+{
+    return timepoint;
+}
+
 inline const Millisecs &ITimer::TimerItem::getPeriod() const
 {
     return period;
