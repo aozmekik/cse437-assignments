@@ -17,6 +17,8 @@ using TPredicate = std::function<bool()>;
 class ITimer
 {
 public:
+    ITimer();
+
     // run the callback once at time point tp.
     void registerTimer(const Timepoint &tp, const TITimerCallback &cb);
 
@@ -59,10 +61,12 @@ private:
     void wait(TimerItem &);
     void execute(TimerItem &);
 
-    bool run = true;
-
-    std::mutex mtx;
+    // sync of thread.
+    bool run = false;
+    bool finished = false;
+    std::mutex mtx_run, mtx_finished;
     std::condition_variable cv;
+    std::thread handler_thread;
 
     std::vector<TimerItem> list;
 
@@ -71,74 +75,93 @@ private:
 
 const Millisecs ITimer::zero_sec = Millisecs(0);
 
+ITimer::ITimer() : handler_thread(&ITimer::handler, this)
+{
+    /* intentionally left blank */
+}
+
 void ITimer::registerTimer(const Timepoint &tp, const TITimerCallback &cb)
 {
-    std::unique_lock<std::mutex> lck(mtx);
 
     Millisecs ms = std::chrono::duration_cast<std::chrono::milliseconds>(tp - CLOCK::now());
-    // auto t1 = std::chrono::seconds(0);
-    // auto t2 = tp + std::chrono::seconds(0);
 
+    std::unique_lock<std::mutex> lck(mtx_run);
     list.push_back(TimerItem(
         cb, [tp]() { 
             auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(CLOCK::now() - tp).count();
-            // std:: cout << diff << std::endl;
-            // std::cout << (diff < 0) << std::endl;
             return (diff < 0); }, ms));
-
+    run = true;
     cv.notify_all();
 }
 
 void ITimer::registerTimer(const Millisecs &period, const TITimerCallback &cb)
 {
-    std::unique_lock<std::mutex> lck(mtx);
+    std::unique_lock<std::mutex> lck(mtx_run);
 
     list.push_back(TimerItem(
         cb, []() { return true; }, period));
-
+    run = true;
     cv.notify_all();
 }
 
 void ITimer::registerTimer(const Timepoint &tp, const Millisecs &period, const TITimerCallback &cb)
 {
-    std::unique_lock<std::mutex> lck(mtx);
+    std::unique_lock<std::mutex> lck(mtx_run);
 
     list.push_back(TimerItem(
-        cb, [tp]() { return CLOCK::now() < tp; }, period));
-
+        cb, [tp]() { 
+            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(CLOCK::now() - tp).count();
+            return (diff < 0); }, period));
+    run = true;
     cv.notify_all();
 }
 
 void ITimer::registerTimer(const TPredicate &pred, const Millisecs &period, const TITimerCallback &cb)
 {
-    std::unique_lock<std::mutex> lck(mtx);
+    std::unique_lock<std::mutex> lck(mtx_run);
 
     list.push_back(TimerItem(cb, pred, period));
-
+    run = true;
     cv.notify_all();
 }
 
 void ITimer::handler()
 {
-    std::unique_lock<std::mutex> lck(mtx);
-
-    while (run)
+    bool cont = true;
+    while (cont)
     {
-        if (list.empty())
-            break;
+        // mutex block
+        {
+            std::unique_lock<std::mutex> lck(mtx_run);
+            while (!run)
+                cv.wait(lck);
+        }
 
-        // get item - wait for item if necessary - execute
-        auto &item = next();
-        wait(item);
-        execute(item);
+        {
+            std::unique_lock<std::mutex> lck(mtx_finished);
+            if (finished)
+            {
+                cont = false;
+                break;
+            }
+        }
 
-        cv.wait(lck);
+        {
+            std::unique_lock<std::mutex> lck(mtx_run);
+            assert(!list.empty());
+
+            auto &item = next();
+            wait(item);
+            execute(item);
+            run = !list.empty();
+        }
     }
+
+    std::cout << "Timer::thread function terminating..." << std::endl;
 }
 
 ITimer::TimerItem &ITimer::next()
 {
-    // FIXME. if list is empty?
 
     // sort the list in the descending order, last item has the highest priority.
     std::sort(list.begin(), list.end(), [](const TimerItem &lhs, const TimerItem &rhs) {
@@ -151,7 +174,6 @@ ITimer::TimerItem &ITimer::next()
 
 void ITimer::wait(TimerItem &item)
 {
-    // auto &elapsed = item.getElapsed();
     auto time_to_wait = item.getTimeToWait();
 
     if (time_to_wait > zero_sec)
@@ -172,21 +194,29 @@ void ITimer::wait(TimerItem &item)
 void ITimer::execute(TimerItem &item)
 {
     std::function<void()> f = item.getCallBack();
-    f();
+    if (item.getPredict())
+        f();
 }
 
 ITimer::~ITimer()
 {
-    std::unique_lock<std::mutex> lck(mtx);
-    run = false;
-    cv.notify_all();
+    {
+        std::unique_lock<std::mutex> lck(mtx_finished);
+        finished = true;
+    }
+    {
+        std::unique_lock<std::mutex> lck(mtx_run);
+        run = true;
+        cv.notify_all();
+    }
+
+    handler_thread.join();
 }
 
 ITimer::TimerItem::TimerItem(const TITimerCallback &cb, const TPredicate &pred, const Millisecs &ms)
     : callback(cb), predict(pred), period(ms), time_to_wait(ms)
 {
     /* intentionally left blank */
-    // std::cout << time_to_wait.count() << std::endl;
 }
 
 inline const TITimerCallback &ITimer::TimerItem::getCallBack() const
